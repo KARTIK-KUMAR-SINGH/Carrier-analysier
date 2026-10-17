@@ -1,452 +1,3 @@
-# # """Resume-powered Career Navigator (Streamlit + Neo4j + Ollama)
-
-# # Run:  streamlit run app.py
-# # Needs career_navigator.py in the same folder, seed.cypher already loaded,
-# # and Ollama running with the model below pulled.
-# # """
-# # import json
-# # import os
-
-# # import fitz  # pymupdf
-# # import ollama
-# # import streamlit as st
-
-# # import pandas as pd
-
-# # from career_navigator import analyze, driver, mark_completed, save_profile
-
-# # MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
-
-# # st.set_page_config(page_title="Career Navigator", page_icon="🧭", layout="wide")
-# # st.title("🧭 Career Navigator")
-
-
-# # # ---------- Graph helpers ----------
-# # def graph_list(query, key):
-# #     with driver.session() as s:
-# #         return [r[key] for r in s.run(query)]
-
-
-# # def known_skills():
-# #     return graph_list("MATCH (s:Skill) RETURN s.name AS n ORDER BY n", "n")
-
-
-# # def known_roles():
-# #     return graph_list("MATCH (r:JobRole) RETURN r.title AS n ORDER BY n", "n")
-
-
-# # def owned_skills(pid="me"):
-# #     with driver.session() as s:
-# #         return [r["n"] for r in s.run(
-# #             "MATCH (:Person {id:$pid})-[:HAS_SKILL]->(s:Skill) RETURN s.name AS n", pid=pid)]
-
-
-# # def role_scores(pid="me"):
-# #     """Importance-weighted fit (%) for every role in the graph."""
-# #     q = """
-# #     MATCH (r:JobRole)-[req:REQUIRES]->(s:Skill)
-# #     OPTIONAL MATCH (p:Person {id:$pid})-[:HAS_SKILL]->(s)
-# #     WITH r, sum(req.importance) AS total,
-# #          sum(CASE WHEN p IS NULL THEN 0 ELSE req.importance END) AS have
-# #     RETURN r.title AS role, round(100.0 * have / total) AS pct
-# #     ORDER BY pct DESC
-# #     """
-# #     with driver.session() as s:
-# #         return [r.data() for r in s.run(q, pid=pid)]
-
-
-# # def path_dot(path):
-# #     """Graphviz picture: green = you have it, orange = gap; arrows = prerequisite."""
-# #     gaps = [g["skill"] for g in path]
-# #     owned = set(owned_skills())
-# #     with driver.session() as s:
-# #         edges = [(r["a"], r["b"]) for r in s.run(
-# #             "MATCH (a:Skill)-[:PREREQUISITE_OF]->(b:Skill) WHERE b.name IN $g "
-# #             "RETURN a.name AS a, b.name AS b", g=gaps)]
-# #     nodes = set(gaps) | {a for a, _ in edges}
-# #     lines = ['digraph G { rankdir=LR; node [shape=box, style=filled, fontname=Helvetica];']
-# #     for n in nodes:
-# #         color = "#9be7a8" if n in owned else "#ffd29b"
-# #         lines.append(f'"{n}" [fillcolor="{color}"];')
-# #     for a, b in edges:
-# #         lines.append(f'"{a}" -> "{b}";')
-# #     lines.append("}")
-# #     return "\n".join(lines)
-
-
-# # # ---------- Resume extraction ----------
-# # def pdf_to_text(file):
-# #     doc = fitz.open(stream=file.read(), filetype="pdf")
-# #     return "\n".join(page.get_text() for page in doc)
-
-
-# # def extract_profile(text, skills):
-# #     """LLM picks only skills from our canonical list -> built-in normalization."""
-# #     prompt = (
-# #         "Read this resume. Return JSON: "
-# #         '{"name": "<full name>", "skills": ["<skill>", ...]}. '
-# #         "Only include skills from this allowed list that the resume clearly shows:\n"
-# #         f"{json.dumps(skills)}\n\nRESUME:\n{text[:6000]}"
-# #     )
-# #     out = ollama.chat(
-# #         model=MODEL, format="json", messages=[{"role": "user", "content": prompt}]
-# #     )["message"]["content"]
-# #     data = json.loads(out)
-# #     found = [s for s in data.get("skills", []) if s in skills]  # drop hallucinations
-# #     return data.get("name", "Learner"), sorted(set(found))
-
-
-# # # ---------- Career-only chatbot ----------
-# # SYSTEM = (
-# #     "You are a career guidance assistant. Answer ONLY career-related questions "
-# #     "(skills, jobs, resumes, interviews, learning paths). Use ONLY the CONTEXT "
-# #     "below for skills, courses and links; never invent any. If the context does "
-# #     "not contain the answer, say so. Be concise and encouraging.\n\nCONTEXT:\n"
-# # )
-
-
-# # def is_career_question(msg):
-# #     out = ollama.chat(
-# #         model=MODEL,
-# #         messages=[{
-# #             "role": "user",
-# #             "content": "Is this message about careers, jobs, skills, resumes, "
-# #                        "interviews, studying or learning for work? "
-# #                        f"Answer only YES or NO.\n\nMessage: {msg}",
-# #         }],
-# #     )["message"]["content"]
-# #     return out.strip().upper().startswith("YES")
-
-
-# # def stream_answer(history, context):
-# #     msgs = [{"role": "system", "content": SYSTEM + json.dumps(context)}] + history[-6:]
-# #     for chunk in ollama.chat(model=MODEL, messages=msgs, stream=True):
-# #         yield chunk["message"]["content"]
-
-
-# # # ---------- Sidebar: profile creation ----------
-# # with st.sidebar:
-# #     st.header("1. Your profile")
-# #     pdf = st.file_uploader("Upload resume (PDF)", type="pdf")
-# #     role = st.selectbox("Target role", known_roles())
-# #     if st.button("Analyze my resume", type="primary", disabled=pdf is None):
-# #         with st.spinner("Reading resume and updating graph..."):
-# #             name, skills = extract_profile(pdf_to_text(pdf), known_skills())
-# #             save_profile("me", name, {s: 3 for s in skills}, role)
-# #             st.session_state.result = analyze("me")
-# #             st.session_state.name, st.session_state.skills = name, skills
-# #             st.session_state.chat = []
-
-# # # ---------- Main area ----------
-# # if "result" not in st.session_state:
-# #     st.info("Upload your resume and pick a target role in the sidebar to begin.")
-# #     st.stop()
-
-# # res = st.session_state.result
-# # tab1, tab2, tab3 = st.tabs(["📊 Skill gap & path", "🎯 Role fit", "💬 Career chat"])
-
-# # with tab1:
-# #     st.subheader(f"Hi {st.session_state.name}")
-# #     st.write("**Skills found in your resume:**", ", ".join(st.session_state.skills) or "none")
-# #     m = res["match"]
-# #     if m:
-# #         pct = int(100 * m["have"] / m["total"])
-# #         st.metric(f"Match for {m['role']}", f"{pct}%", f"{m['have']}/{m['total']} required skills")
-# #         st.progress(pct / 100)
-
-# #     path = res["learning_path"]
-# #     total_h = sum(
-# #         (g["resources"][0]["hours"] or 0)
-# #         for g in path if g["resources"] and g["resources"][0]["title"]
-# #     )
-# #     hpw = st.slider("Hours you can study per week", 2, 30, 8)
-# #     c1, c2 = st.columns(2)
-# #     c1.metric("Total study time", f"{total_h} h")
-# #     c2.metric("Estimated time to be job-ready", f"{-(-total_h // hpw)} weeks")
-
-# #     st.markdown("**Skill map** (green = you have it, orange = gap, arrow = learn first)")
-# #     st.graphviz_chart(path_dot(path))
-
-# #     st.subheader("Your learning path (learn top to bottom)")
-# #     plan = [f"# Learning plan for {st.session_state.name}", ""]
-# #     for i, g in enumerate(path, 1):
-# #         titles = ", ".join(r["title"] for r in g["resources"] if r["title"]) or "no resource yet"
-# #         plan.append(f"{i}. {g['skill']}: {titles}")
-# #         with st.expander(f"{i}. {g['skill']}  (importance {g['importance']})"):
-# #             for j, r in enumerate(g["resources"]):
-# #                 if r["title"]:
-# #                     a, b = st.columns([4, 1])
-# #                     a.markdown(f"[{r['title']}]({r['url']}) , ~{r['hours']}h")
-# #                     if b.button("Done ✅", key=f"done_{i}_{j}"):
-# #                         mark_completed("me", r["title"])
-# #                         st.session_state.result = analyze("me")
-# #                         st.rerun()
-# #     st.download_button("⬇️ Download my plan", "\n".join(plan), "learning_plan.md")
-
-# # with tab2:
-# #     st.subheader("How well you fit each role")
-# #     scores = role_scores("me")
-# #     st.bar_chart(pd.DataFrame(scores).set_index("role")["pct"])
-# #     st.success(f"Best current fit: {scores[0]['role']} ({int(scores[0]['pct'])}%)")
-
-# # with tab3:
-# #     for m_ in st.session_state.chat:
-# #         st.chat_message(m_["role"]).write(m_["content"])
-# #     q = st.chat_input("Ask about your career path...")
-# #     if q:
-# #         st.session_state.chat.append({"role": "user", "content": q})
-# #         st.chat_message("user").write(q)
-# #         with st.chat_message("assistant"):
-# #             if is_career_question(q):
-# #                 ctx = {**res, "role_fit_percent": role_scores("me")}
-# #                 ans = st.write_stream(stream_answer(st.session_state.chat, ctx))
-# #             else:
-# #                 ans = "I can only help with career-related questions, like skills, roles, resumes and learning paths."
-# #                 st.write(ans)
-# #         st.session_state.chat.append({"role": "assistant", "content": ans})
-
-
-
-# """Resume-powered Career Navigator (Streamlit + Neo4j + Ollama)
-
-# Run:  streamlit run app.py
-# Needs career_navigator.py in the same folder, seed.cypher already loaded,
-# and Ollama running with the model below pulled.
-# """
-# import json
-# import os
-
-# import fitz  # pymupdf
-# import ollama
-# import streamlit as st
-
-# import pandas as pd
-
-# from career_navigator import analyze, driver, mark_completed, save_profile
-
-# MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
-
-# st.set_page_config(page_title="Career Navigator", page_icon="🧭", layout="wide")
-# st.title("🧭 Career Navigator")
-
-
-# # ---------- Graph helpers ----------
-# def graph_list(query, key):
-#     with driver.session() as s:
-#         return [r[key] for r in s.run(query)]
-
-
-# def known_skills():
-#     return graph_list("MATCH (s:Skill) RETURN s.name AS n ORDER BY n", "n")
-
-
-# def known_roles():
-#     return graph_list("MATCH (r:JobRole) RETURN r.title AS n ORDER BY n", "n")
-
-
-# def owned_skills(pid="me"):
-#     with driver.session() as s:
-#         return [r["n"] for r in s.run(
-#             "MATCH (:Person {id:$pid})-[:HAS_SKILL]->(s:Skill) RETURN s.name AS n", pid=pid)]
-
-
-# def role_scores(pid="me"):
-#     """Importance-weighted fit (%) for every role in the graph."""
-#     q = """
-#     MATCH (r:JobRole)-[req:REQUIRES]->(s:Skill)
-#     OPTIONAL MATCH (p:Person {id:$pid})-[:HAS_SKILL]->(s)
-#     WITH r, sum(req.importance) AS total,
-#          sum(CASE WHEN p IS NULL THEN 0 ELSE req.importance END) AS have
-#     RETURN r.title AS role, round(100.0 * have / total) AS pct
-#     ORDER BY pct DESC
-#     """
-#     with driver.session() as s:
-#         return [r.data() for r in s.run(q, pid=pid)]
-
-
-# def path_dot(path):
-#     """Graphviz picture: green = you have it, orange = gap; arrows = prerequisite."""
-#     gaps = [g["skill"] for g in path]
-#     owned = set(owned_skills())
-#     with driver.session() as s:
-#         edges = [(r["a"], r["b"]) for r in s.run(
-#             "MATCH (a:Skill)-[:PREREQUISITE_OF]->(b:Skill) WHERE b.name IN $g "
-#             "RETURN a.name AS a, b.name AS b", g=gaps)]
-#     nodes = set(gaps) | {a for a, _ in edges}
-#     lines = ['digraph G { rankdir=LR; node [shape=box, style=filled, fontname=Helvetica];']
-#     for n in nodes:
-#         color = "#9be7a8" if n in owned else "#ffd29b"
-#         lines.append(f'"{n}" [fillcolor="{color}"];')
-#     for a, b in edges:
-#         lines.append(f'"{a}" -> "{b}";')
-#     lines.append("}")
-#     return "\n".join(lines)
-
-
-# # ---------- Resume extraction ----------
-# def pdf_to_text(file):
-#     doc = fitz.open(stream=file.read(), filetype="pdf")
-#     return "\n".join(page.get_text() for page in doc)
-
-
-# def extract_profile(text, skills):
-#     """LLM picks only skills from our canonical list -> built-in normalization."""
-#     prompt = (
-#         "Read this resume. Return JSON: "
-#         '{"name": "<full name>", "skills": ["<skill>", ...]}. '
-#         "Only include skills from this allowed list that the resume clearly shows:\n"
-#         f"{json.dumps(skills)}\n\nRESUME:\n{text[:6000]}"
-#     )
-#     import re
-
-#     # 1) Keyword matching (instant, works even if the model is not ready)
-#     aliases = {
-#         "Cloud (AWS)": ["aws", "amazon web services"],
-#         "CI/CD": ["ci/cd", "github actions", "jenkins"],
-#         "Machine Learning": ["machine learning", "scikit-learn", "sklearn"],
-#         "Deep Learning": ["deep learning", "pytorch", "tensorflow", "keras"],
-#         "NLP": ["nlp", "natural language"],
-#         "HTML/CSS": ["html", "css"],
-#         "Node.js": ["node.js", "nodejs", "express.js"],
-#         "JavaScript": ["javascript", "js"],
-#         "Data Visualization": ["data visualization", "matplotlib", "seaborn", "tableau"],
-#         "Cybersecurity": ["cybersecurity", "cyber security", "pentest"],
-#         "Data Structures": ["data structures", "dsa"],
-#         "Kubernetes": ["kubernetes", "k8s"],
-#         "APIs": ["api", "apis", "rest"],
-#     }
-#     low = text.lower()
-#     found = set()
-#     for sk in skills:
-#         for term in aliases.get(sk, []) + [sk.lower()]:
-#             if re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", low):
-#                 found.add(sk)
-#                 break
-#     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-#     name = lines[0][:40] if lines else "Learner"
-
-#     # 2) LLM adds anything the keywords missed (skipped if Ollama is unavailable)
-#     try:
-#         out = ollama.chat(
-#             model=MODEL, format="json", messages=[{"role": "user", "content": prompt}]
-#         )["message"]["content"]
-#         data = json.loads(out)
-#         found |= {s for s in data.get("skills", []) if s in skills}  # drop hallucinations
-#         name = data.get("name") or name
-#     except Exception as e:
-#         st.warning(f"AI model not available, used keyword matching instead ({type(e).__name__}).")
-#     return name, sorted(found)
-
-
-# # ---------- Career-only chatbot ----------
-# SYSTEM = (
-#     "You are a career guidance assistant. Answer ONLY career-related questions "
-#     "(skills, jobs, resumes, interviews, learning paths). Use ONLY the CONTEXT "
-#     "below for skills, courses and links; never invent any. If the context does "
-#     "not contain the answer, say so. Be concise and encouraging.\n\nCONTEXT:\n"
-# )
-
-
-# def is_career_question(msg):
-#     out = ollama.chat(
-#         model=MODEL,
-#         messages=[{
-#             "role": "user",
-#             "content": "Is this message about careers, jobs, skills, resumes, "
-#                        "interviews, studying or learning for work? "
-#                        f"Answer only YES or NO.\n\nMessage: {msg}",
-#         }],
-#     )["message"]["content"]
-#     return out.strip().upper().startswith("YES")
-
-
-# def stream_answer(history, context):
-#     msgs = [{"role": "system", "content": SYSTEM + json.dumps(context)}] + history[-6:]
-#     for chunk in ollama.chat(model=MODEL, messages=msgs, stream=True):
-#         yield chunk["message"]["content"]
-
-
-# # ---------- Sidebar: profile creation ----------
-# with st.sidebar:
-#     st.header("1. Your profile")
-#     pdf = st.file_uploader("Upload resume (PDF)", type="pdf")
-#     role = st.selectbox("Target role", known_roles())
-#     if st.button("Analyze my resume", type="primary", disabled=pdf is None):
-#         with st.spinner("Reading resume and updating graph..."):
-#             name, skills = extract_profile(pdf_to_text(pdf), known_skills())
-#             save_profile("me", name, {s: 3 for s in skills}, role)
-#             st.session_state.result = analyze("me")
-#             st.session_state.name, st.session_state.skills = name, skills
-#             st.session_state.chat = []
-
-# # ---------- Main area ----------
-# if "result" not in st.session_state:
-#     st.info("Upload your resume and pick a target role in the sidebar to begin.")
-#     st.stop()
-
-# res = st.session_state.result
-# tab1, tab2, tab3 = st.tabs(["📊 Skill gap & path", "🎯 Role fit", "💬 Career chat"])
-
-# with tab1:
-#     st.subheader(f"Hi {st.session_state.name}")
-#     st.write("**Skills found in your resume:**", ", ".join(st.session_state.skills) or "none")
-#     m = res["match"]
-#     if m:
-#         pct = int(100 * m["have"] / m["total"])
-#         st.metric(f"Match for {m['role']}", f"{pct}%", f"{m['have']}/{m['total']} required skills")
-#         st.progress(pct / 100)
-
-#     path = res["learning_path"]
-#     total_h = sum(
-#         (g["resources"][0]["hours"] or 0)
-#         for g in path if g["resources"] and g["resources"][0]["title"]
-#     )
-#     hpw = st.slider("Hours you can study per week", 2, 30, 8)
-#     c1, c2 = st.columns(2)
-#     c1.metric("Total study time", f"{total_h} h")
-#     c2.metric("Estimated time to be job-ready", f"{-(-total_h // hpw)} weeks")
-
-#     st.markdown("**Skill map** (green = you have it, orange = gap, arrow = learn first)")
-#     st.graphviz_chart(path_dot(path))
-
-#     st.subheader("Your learning path (learn top to bottom)")
-#     plan = [f"# Learning plan for {st.session_state.name}", ""]
-#     for i, g in enumerate(path, 1):
-#         titles = ", ".join(r["title"] for r in g["resources"] if r["title"]) or "no resource yet"
-#         plan.append(f"{i}. {g['skill']}: {titles}")
-#         with st.expander(f"{i}. {g['skill']}  (importance {g['importance']})"):
-#             for j, r in enumerate(g["resources"]):
-#                 if r["title"]:
-#                     a, b = st.columns([4, 1])
-#                     a.markdown(f"[{r['title']}]({r['url']}) , ~{r['hours']}h")
-#                     if b.button("Done ✅", key=f"done_{i}_{j}"):
-#                         mark_completed("me", r["title"])
-#                         st.session_state.result = analyze("me")
-#                         st.rerun()
-#     st.download_button("⬇️ Download my plan", "\n".join(plan), "learning_plan.md")
-
-# with tab2:
-#     st.subheader("How well you fit each role")
-#     scores = role_scores("me")
-#     st.bar_chart(pd.DataFrame(scores).set_index("role")["pct"])
-#     st.success(f"Best current fit: {scores[0]['role']} ({int(scores[0]['pct'])}%)")
-
-# with tab3:
-#     for m_ in st.session_state.chat:
-#         st.chat_message(m_["role"]).write(m_["content"])
-#     q = st.chat_input("Ask about your career path...")
-#     if q:
-#         st.session_state.chat.append({"role": "user", "content": q})
-#         st.chat_message("user").write(q)
-#         with st.chat_message("assistant"):
-#             if is_career_question(q):
-#                 ctx = {**res, "role_fit_percent": role_scores("me")}
-#                 ans = st.write_stream(stream_answer(st.session_state.chat, ctx))
-#             else:
-#                 ans = "I can only help with career-related questions, like skills, roles, resumes and learning paths."
-#                 st.write(ans)
-#         st.session_state.chat.append({"role": "assistant", "content": ans})
-
 """Resume-powered Career Navigator (Streamlit + Neo4j + Ollama)
 
 Run:  streamlit run app.py
@@ -464,7 +15,7 @@ import pandas as pd
 
 from career_navigator import analyze, driver, mark_completed, save_profile
 
-MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
 
 st.set_page_config(page_title="Career Navigator", page_icon="🧭", layout="wide")
 st.markdown("""
@@ -507,7 +58,21 @@ div[data-testid="stExpander"] {
 .stButton > button:hover, .stDownloadButton > button:hover {
   transform: translateY(-2px); box-shadow: 0 6px 22px #7c5cff77; border-color: #fff; color: #fff;
 }
+[data-testid="stHeader"] { background: transparent; }
+h1, h2, h3, h4, h5, h6,
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stWidgetLabel"] p,
+[data-testid="stMetricLabel"] *,
+[data-testid="stMetricValue"] *,
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] summary * { color: #e8ecff !important; }
+[data-testid="stExpander"] summary { background: #1a2147 !important; }
+[data-testid="stExpander"] summary:hover { background: #242d63 !important; }
+[data-testid="stMarkdownContainer"] a { color: #7dd3fc !important; }
 button[data-baseweb="tab"] { font-weight: 600; font-size: 1rem; }
+button[data-baseweb="tab"] * { color: #aeb8ee !important; }
+button[data-baseweb="tab"][aria-selected="true"] * { color: #ffffff !important; }
 .chip {
   display: inline-block; padding: 4px 13px; margin: 3px; border-radius: 999px;
   background: #22d3ee22; border: 1px solid #22d3ee66; color: #9ff3ff; font-size: .85rem;
@@ -579,6 +144,53 @@ def path_dot(path):
         lines.append(f'"{a}" -> "{b}";')
     lines.append("}")
     return "\n".join(lines)
+
+
+def make_pdf(name, role, pct, total_h, weeks, path):
+    """Build a clean PDF learning plan (needs: pip install fpdf2)."""
+    from fpdf import FPDF
+
+    def t(s):  # core PDF fonts are latin-1 only
+        return str(s).encode("latin-1", "replace").decode("latin-1")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_fill_color(124, 92, 255)
+    pdf.rect(0, 0, 210, 40, "F")
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 22)
+    pdf.set_xy(12, 10)
+    pdf.cell(0, 10, "Career Navigator - Learning Plan")
+    pdf.set_font("Helvetica", "", 11)
+    pdf.set_xy(12, 23)
+    pdf.cell(0, 8, t(f"Prepared for {name}   |   Target role: {role}"))
+
+    pdf.set_xy(12, 48)
+    pdf.set_text_color(30, 30, 50)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, t(f"Current match: {pct}%   |   Study time: {total_h} h   |   About {weeks} weeks"),
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    for i, g in enumerate(path, 1):
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.set_text_color(76, 50, 190)
+        pdf.cell(0, 9, t(f"{i}. {g['skill']}  (importance {g['importance']})"),
+                 new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 11)
+        for r in g["resources"]:
+            if r["title"]:
+                pdf.set_text_color(20, 90, 200)
+                pdf.cell(0, 7, t(f"    - {r['title']} (~{r['hours']}h)"),
+                         link=r["url"], new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+
+    pdf.set_text_color(120, 120, 140)
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.ln(4)
+    pdf.cell(0, 6, "Generated by Career Navigator (Neo4j knowledge graph).")
+    return bytes(pdf.output())
 
 
 # ---------- Resume extraction ----------
@@ -691,6 +303,7 @@ with tab1:
     chips = "".join(f'<span class="chip">{s}</span>' for s in st.session_state.skills)
     st.markdown(chips or "_none detected_", unsafe_allow_html=True)
     m = res["match"]
+    pct = 0
     if m:
         pct = int(100 * m["have"] / m["total"])
         st.metric(f"Match for {m['role']}", f"{pct}%", f"{m['have']}/{m['total']} required skills")
@@ -732,7 +345,15 @@ with tab1:
                         mark_completed("me", r["title"])
                         st.session_state.result = analyze("me")
                         st.rerun()
-    st.download_button("⬇️ Download my plan", "\n".join(plan), "learning_plan.md")
+    try:
+        pdf_bytes = make_pdf(
+            st.session_state.name, m["role"] if m else role, pct,
+            total_h, -(-total_h // hpw), path,
+        )
+        st.download_button("⬇️ Download my plan (PDF)", pdf_bytes,
+                           "learning_plan.pdf", mime="application/pdf")
+    except ImportError:
+        st.warning("PDF export needs one install: run  pip install fpdf2  then restart the app.")
 
 with tab2:
     st.subheader("How well you fit each role")

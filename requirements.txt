@@ -1,6 +1,6 @@
-"venv/" | Out-File -Encoding ascii -Append .gitignore
-"__pycache__/" | Out-File -Encoding ascii -Append .gitignore
-git rm -r --cached venv -q
-git add requirements.txt .gitignore app.py career_navigator.py
-git commit -m "add requirements"
-git push
+   streamlit
+   neo4j
+   ollama
+   pymupdf
+   fpdf2
+   pandas
